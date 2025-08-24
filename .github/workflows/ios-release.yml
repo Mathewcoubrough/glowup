@@ -120,15 +120,29 @@ jobs:
           xcodebuild -list -workspace ios/App/App.xcworkspace | tee build/xcodebuild-list.txt || true
           xcodebuild -list -project ios/App/App.xcodeproj | tee -a build/xcodebuild-list.txt || true
 
-      - name: Set build/version numbers in Info.plist
-        env:
-          NUM: ${{ github.run_number }}
-        run: |
-          set -euxo pipefail
-          /usr/libexec/PlistBuddy -c "Add :CFBundleShortVersionString string 1.0.0" ios/App/App/Info.plist || true
-          /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString 1.0.0" ios/App/App/Info.plist || true
-          /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $NUM" ios/App/App/Info.plist || true
-          /usr/libexec/PlistBuddy -c "Print" ios/App/App/Info.plist | sed -n '1,120p' || true
+      - name: Force bundle id + version in Info.plist
+  env:
+    APP_BUNDLE_ID: ${{ env.APP_BUNDLE_ID }}
+    NUM: ${{ github.run_number }}
+  run: |
+    set -euxo pipefail
+    PLIST=ios/App/App/Info.plist
+
+    # Ensure CFBundleIdentifier equals the bundle id from your provisioning profile
+    /usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier $APP_BUNDLE_ID" "$PLIST" || \
+    /usr/libexec/PlistBuddy -c "Add :CFBundleIdentifier string $APP_BUNDLE_ID" "$PLIST"
+
+    # Safe versioning (won't fail if keys already exist)
+    /usr/libexec/PlistBuddy -c "Add :CFBundleShortVersionString string 1.0.0" "$PLIST" || true
+    /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString 1.0.0" "$PLIST" || true
+    /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $NUM" "$PLIST" || true
+
+    # Show we set it correctly
+    echo "----- Info.plist after edits -----"
+    /usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" "$PLIST" || true
+    /usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$PLIST" || true
+    /usr/libexec/PlistBuddy -c "Print :CFBundleVersion" "$PLIST" || true
+
 
       - name: Archive (Release)
         env:
