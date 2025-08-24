@@ -18,7 +18,7 @@ jobs:
         with:
           node-version: '20'
 
-      # ✅ Pin Xcode to a known version
+      # Pin Xcode to a known-good version
       - name: Setup Xcode 15.4
         uses: maxim-lobanov/setup-xcode@v1
         with:
@@ -52,13 +52,12 @@ jobs:
           xcodebuild -list -workspace ios/App/App.xcworkspace || true
           xcodebuild -list -project ios/App/App.xcodeproj || true
 
-      - name: Build (Simulator) – iPhone 15 Pro on latest iOS
+      - name: Build (Simulator) – iPhone 15 Pro (latest iOS)
         env:
           DEVELOPER_DIR: /Applications/Xcode_15.4.app/Contents/Developer
         run: |
           set -euo pipefail
           if [ -f "ios/App/App.xcworkspace" ]; then
-            echo "Building via workspace"
             xcodebuild \
               -workspace ios/App/App.xcworkspace \
               -scheme App \
@@ -71,7 +70,6 @@ jobs:
               CODE_SIGN_IDENTITY="" \
               clean build
           else
-            echo "Building via project"
             xcodebuild \
               -project ios/App/App.xcodeproj \
               -scheme App \
