@@ -20,7 +20,7 @@ jobs:
         with:
           xcode-version: '15.4'
 
-      # --- Minimal web + Capacitor scaffold so xcodebuild has inputs ---
+      # Minimal web + Capacitor scaffold so xcodebuild has inputs
       - name: Ensure Capacitor app files
         run: |
           set -euxo pipefail
@@ -64,12 +64,12 @@ jobs:
           pod install --no-repo-update --verbose
           cd ../..
 
-      # --- Secrets sanity check so we fail early with a clear message ---
+      # Fail early if any required secret is missing
       - name: Check required secrets
         env:
           HAVE_P12: ${{ secrets.IOS_CERT_P12_BASE64 != '' }}
           HAVE_PWD: ${{ secrets.IOS_CERT_PASSWORD != '' }}
-          HAVE_PROF:${{ secrets.IOS_PROFILE_BASE64 != '' }}
+          HAVE_PROF: ${{ secrets.IOS_PROFILE_BASE64 != '' }}
           HAVE_ID:  ${{ secrets.APPLE_ID != '' }}
           HAVE_ASP: ${{ secrets.FASTLANE_APPLE_APPLICATION_SPECIFIC_PASSWORD != '' }}
         run: |
@@ -120,14 +120,11 @@ jobs:
           echo "Profile application-identifier: $APPID"
           echo "Profile TeamIdentifier[0]: $TEAMINPROF"
 
-          # Export for later steps
-          echo "PROFILE_UUID=$UUID" >> $GITHUB_ENV
-          echo "PROFILE_NAME=$NAME"  >> $GITHUB_ENV
-          # Derive bundle id (APPID is TEAMID.bundleid) and team id
+          # Export for later steps (APPID is TEAMID.bundleid)
+          echo "PROFILE_UUID=$UUID"    >> $GITHUB_ENV
+          echo "PROFILE_NAME=$NAME"    >> $GITHUB_ENV
           echo "APP_BUNDLE_ID=${APPID#*.}" >> $GITHUB_ENV
-          echo "TEAM_ID=$TEAMINPROF"       >> $GITHUB_ENV
-          echo "Effective APP_BUNDLE_ID: ${APPID#*.}"
-          echo "Effective TEAM_ID: $TEAMEINPROF"
+          echo "TEAM_ID=$TEAMINPROF"   >> $GITHUB_ENV
 
       - name: Show Xcode setup / schemes
         run: |
@@ -147,10 +144,10 @@ jobs:
 
       - name: Archive (Release)
         env:
-          TEAM_ID: ${{ env.TEAM_ID }}
-          PROFILE_NAME: ${{ env.PROFILE_NAME }}
-          PROFILE_UUID: ${{ env.PROFILE_UUID }}
-          APP_BUNDLE_ID: ${{ env.APP_BUNDLE_ID }}
+          TEAM_ID:        ${{ env.TEAM_ID }}
+          PROFILE_NAME:   ${{ env.PROFILE_NAME }}
+          PROFILE_UUID:   ${{ env.PROFILE_UUID }}
+          APP_BUNDLE_ID:  ${{ env.APP_BUNDLE_ID }}
         run: |
           set -euxo pipefail
           echo "Using APP_BUNDLE_ID: $APP_BUNDLE_ID"
