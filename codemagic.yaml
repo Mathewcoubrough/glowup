@@ -13,9 +13,9 @@ workflows:
 
     code_signing:
       certificates:
-        - ios_dist.p12            # <-- change to your uploaded .p12 filename
+        - C:\Users\Mathe\ios_dist.p12
       provisioning_profiles:
-        - GlowUp_AppStore.mobileprovision  # <-- change to your uploaded .mobileprovision filename
+        - C:\Users\Mathe\GlowUp_AppStore.mobileprovision
 
     scripts:
       - name: Install JS deps & Capacitor
