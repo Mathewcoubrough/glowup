@@ -1,0 +1,65 @@
+name: iOS (simulator) build
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]   # change to your default branch if not 'main'
+
+jobs:
+  build-ios-sim:
+    runs-on: macos-14
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install dependencies
+        run: |
+          npm ci || npm i
+          # Ensure Capacitor iOS is present
+          npm i -D @capacitor/ios @capacitor/cli @capacitor/core
+
+      - name: Prepare iOS platform
+        run: |
+          npx cap add ios || true
+          npx cap sync ios
+          npx cap doctor || true
+          ls -la
+          ls -la ios || true
+          ls -la ios/App || true
+
+      - name: Build (Simulator)
+        run: |
+          set -e
+          if [ -f "ios/App/App.xcworkspace" ]; then
+            echo "Building via workspace"
+            xcodebuild \
+              -workspace ios/App/App.xcworkspace \
+              -scheme App \
+              -configuration Debug \
+              -sdk iphonesimulator \
+              -destination 'generic/platform=iOS Simulator' \
+              -derivedDataPath build \
+              build
+          else
+            echo "Building via project"
+            xcodebuild \
+              -project ios/App/App.xcodeproj \
+              -scheme App \
+              -configuration Debug \
+              -sdk iphonesimulator \
+              -destination 'generic/platform=iOS Simulator' \
+              -derivedDataPath build \
+              build
+          fi
+
+      - name: Upload simulator artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-simulator-build
+          path: build/Build/Products/**/App.app
