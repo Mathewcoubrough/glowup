@@ -20,6 +20,7 @@ jobs:
         with:
           xcode-version: '15.4'
 
+      # --- Minimal web + Capacitor scaffold so xcodebuild has inputs ---
       - name: Ensure Capacitor app files
         run: |
           set -euxo pipefail
@@ -63,6 +64,26 @@ jobs:
           pod install --no-repo-update --verbose
           cd ../..
 
+      # --- Secrets sanity check so we fail early with a clear message ---
+      - name: Check required secrets
+        env:
+          HAVE_P12: ${{ secrets.IOS_CERT_P12_BASE64 != '' }}
+          HAVE_PWD: ${{ secrets.IOS_CERT_PASSWORD != '' }}
+          HAVE_PROF:${{ secrets.IOS_PROFILE_BASE64 != '' }}
+          HAVE_ID:  ${{ secrets.APPLE_ID != '' }}
+          HAVE_ASP: ${{ secrets.FASTLANE_APPLE_APPLICATION_SPECIFIC_PASSWORD != '' }}
+        run: |
+          set -e
+          echo "IOS_CERT_P12_BASE64 set?  $HAVE_P12"
+          echo "IOS_CERT_PASSWORD set?    $HAVE_PWD"
+          echo "IOS_PROFILE_BASE64 set?   $HAVE_PROF"
+          echo "APPLE_ID set?             $HAVE_ID"
+          echo "APP-SPECIFIC PASSWORD?    $HAVE_ASP"
+          if [ "$HAVE_P12" != "true" ] || [ "$HAVE_PWD" != "true" ] || [ "$HAVE_PROF" != "true" ] || [ "$HAVE_ID" != "true" ] || [ "$HAVE_ASP" != "true" ]; then
+            echo "::error::One or more required secrets are missing."
+            exit 1
+          fi
+
       - name: Import signing assets
         env:
           IOS_CERT_P12_BASE64: ${{ secrets.IOS_CERT_P12_BASE64 }}
@@ -99,10 +120,14 @@ jobs:
           echo "Profile application-identifier: $APPID"
           echo "Profile TeamIdentifier[0]: $TEAMINPROF"
 
-          # Derive bundle id from the profile (APPID is TEAMID.bundleid)
-          BUNDLE_FROM_PROF="${APPID#*.}"
-          echo "APP_BUNDLE_ID=$BUNDLE_FROM_PROF" >> $GITHUB_ENV
-          echo "Effective APP_BUNDLE_ID: $BUNDLE_FROM_PROF"
+          # Export for later steps
+          echo "PROFILE_UUID=$UUID" >> $GITHUB_ENV
+          echo "PROFILE_NAME=$NAME"  >> $GITHUB_ENV
+          # Derive bundle id (APPID is TEAMID.bundleid) and team id
+          echo "APP_BUNDLE_ID=${APPID#*.}" >> $GITHUB_ENV
+          echo "TEAM_ID=$TEAMINPROF"       >> $GITHUB_ENV
+          echo "Effective APP_BUNDLE_ID: ${APPID#*.}"
+          echo "Effective TEAM_ID: $TEAMEINPROF"
 
       - name: Show Xcode setup / schemes
         run: |
@@ -121,10 +146,16 @@ jobs:
           /usr/libexec/PlistBuddy -c "Print" ios/App/App/Info.plist | sed -n '1,120p' || true
 
       - name: Archive (Release)
+        env:
+          TEAM_ID: ${{ env.TEAM_ID }}
+          PROFILE_NAME: ${{ env.PROFILE_NAME }}
+          PROFILE_UUID: ${{ env.PROFILE_UUID }}
+          APP_BUNDLE_ID: ${{ env.APP_BUNDLE_ID }}
         run: |
           set -euxo pipefail
-          echo "Using APP_BUNDLE_ID: ${APP_BUNDLE_ID}"
-          FLAGS="CODE_SIGN_STYLE=Manual PROVISIONING_PROFILE_SPECIFIER=${PROFILE_NAME} PROVISIONING_PROFILE=${UUID} PRODUCT_BUNDLE_IDENTIFIER=${APP_BUNDLE_ID} OTHER_CODE_SIGN_FLAGS=--keychain\ build.keychain-db"
+          echo "Using APP_BUNDLE_ID: $APP_BUNDLE_ID"
+          echo "Using TEAM_ID: $TEAM_ID"
+          FLAGS="DEVELOPMENT_TEAM=$TEAM_ID PRODUCT_BUNDLE_IDENTIFIER=$APP_BUNDLE_ID CODE_SIGN_STYLE=Manual PROVISIONING_PROFILE_SPECIFIER=$PROFILE_NAME PROVISIONING_PROFILE=$PROFILE_UUID OTHER_CODE_SIGN_FLAGS=--keychain\ build.keychain-db"
           if [ -f "ios/App/App.xcworkspace" ]; then
             xcodebuild -workspace ios/App/App.xcworkspace -scheme App -configuration Release -destination 'generic/platform=iOS' $FLAGS -archivePath $PWD/build/App.xcarchive clean archive | tee build/xcodebuild-archive.log
           else
@@ -132,6 +163,9 @@ jobs:
           fi
 
       - name: Export IPA (App Store)
+        env:
+          APP_BUNDLE_ID: ${{ env.APP_BUNDLE_ID }}
+          PROFILE_NAME:  ${{ env.PROFILE_NAME }}
         run: |
           set -euxo pipefail
           cat > ExportOptions.plist <<EOF
@@ -155,10 +189,15 @@ jobs:
         env:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           FASTLANE_APPLE_APPLICATION_SPECIFIC_PASSWORD: ${{ secrets.FASTLANE_APPLE_APPLICATION_SPECIFIC_PASSWORD }}
+          APP_BUNDLE_ID: ${{ env.APP_BUNDLE_ID }}
         run: |
           set -euxo pipefail
           sudo gem install fastlane -NV
           IPA=$(ls build/*.ipa | head -n1)
+          if [ ! -f "$IPA" ]; then
+            echo "::error::No IPA found in build/. See previous steps' logs."
+            exit 1
+          fi
           echo "Uploading IPA: $IPA for bundle: $APP_BUNDLE_ID"
           fastlane deliver --verbose \
             --username "$APPLE_ID" \
