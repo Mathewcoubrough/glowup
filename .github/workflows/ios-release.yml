@@ -9,9 +9,11 @@ jobs:
     timeout-minutes: 45
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - uses: actions/setup-node@v4
+      - name: Setup Node
+        uses: actions/setup-node@v4
         with:
           node-version: '20'
 
@@ -20,12 +22,12 @@ jobs:
         with:
           xcode-version: '15.4'
 
-      # --- Minimal web + Capacitor scaffold so xcodebuild has inputs ---
+      # Minimal web + Capacitor scaffold so xcodebuild has inputs
       - name: Ensure Capacitor app files
         run: |
           set -euxo pipefail
           test -f package.json || echo '{ "name":"glowup","version":"1.0.0","private":true }' > package.json
-          # Dummy appId here (we override with flags later)
+          # Dummy appId here (we override via codesign flags)
           test -f capacitor.config.json || cat > capacitor.config.json <<'EOF'
           { "appId": "DUMMY.REPLACED.LATER", "appName": "GlowUp Money", "webDir": "web", "bundledWebRuntime": false }
           EOF
@@ -51,7 +53,7 @@ jobs:
           pod install --no-repo-update --verbose
           cd ../..
 
-      # --- Secrets sanity check so we fail clearly if something is missing ---
+      # Secrets sanity check so we fail early with a clear message
       - name: Check required secrets
         env:
           HAVE_P12: ${{ secrets.IOS_CERT_P12_BASE64 != '' }}
@@ -107,7 +109,6 @@ jobs:
           echo "PROFILE_NAME=$NAME"  >> $GITHUB_ENV
           echo "APP_BUNDLE_ID=${APPID#*.}" >> $GITHUB_ENV
           echo "TEAM_ID=$TEAMINPROF" >> $GITHUB_ENV
-
           echo "Profile name: $NAME"
           echo "Profile UUID: $UUID"
           echo "Bundle id:    ${APPID#*.}"
