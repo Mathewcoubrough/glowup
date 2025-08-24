@@ -3,7 +3,7 @@ name: iOS (simulator) build
 on:
   workflow_dispatch:
   push:
-    branches: [ main ]   # change if your default branch isn't 'main'
+    branches: [ ci-clean ]   # run on this branch while we test
 
 jobs:
   build-ios-sim:
@@ -18,7 +18,6 @@ jobs:
         with:
           node-version: '20'
 
-      # Pin Xcode to a known-good version
       - name: Setup Xcode 15.4
         uses: maxim-lobanov/setup-xcode@v1
         with:
@@ -44,13 +43,6 @@ jobs:
           pod repo update || true
           pod install --repo-update
           cd ../..
-
-      - name: Show Xcode setup (debug)
-        run: |
-          xcodebuild -version
-          xcodebuild -showsdks
-          xcodebuild -list -workspace ios/App/App.xcworkspace || true
-          xcodebuild -list -project ios/App/App.xcodeproj || true
 
       - name: Build (Simulator) – iPhone 15 Pro (latest iOS)
         env:
