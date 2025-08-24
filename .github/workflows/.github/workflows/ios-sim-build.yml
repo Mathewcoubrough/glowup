@@ -1,0 +1,42 @@
+name: iOS (simulator) build
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]   # change to your default branch if not 'main'
+
+jobs:
+  build-ios-sim:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install deps
+        run: |
+          npm ci || npm i
+
+      - name: Add iOS platform & sync
+        run: |
+          npx cap add ios || true
+          npx cap sync ios
+
+      - name: Build (Simulator)
+        run: |
+          xcodebuild \
+            -workspace ios/App/App.xcworkspace \
+            -scheme App \
+            -configuration Debug \
+            -sdk iphonesimulator \
+            -destination 'generic/platform=iOS Simulator' \
+            -derivedDataPath build \
+            build
+
+      - name: Upload simulator app artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-simulator-build
+          path: build/Build/Products/**/App.app
