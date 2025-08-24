@@ -8,34 +8,68 @@ on:
 jobs:
   build-ios-sim:
     runs-on: macos-14
-    steps:
-      - uses: actions/checkout@v4
 
-      - uses: actions/setup-node@v4
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
         with:
           node-version: '20'
 
-      - name: Install deps
+      - name: Install JS deps
         run: |
           npm ci || npm i
+          npm i -D @capacitor/cli @capacitor/core @capacitor/ios
 
-      - name: Add iOS platform & sync
+      - name: Prepare iOS platform
         run: |
           npx cap add ios || true
           npx cap sync ios
+          echo "Contents of ios/ and ios/App:"
+          ls -la ios || true
+          ls -la ios/App || true
 
-      - name: Build (Simulator)
+      - name: Install CocoaPods and pods
         run: |
-          xcodebuild \
-            -workspace ios/App/App.xcworkspace \
-            -scheme App \
-            -configuration Debug \
-            -sdk iphonesimulator \
-            -destination 'generic/platform=iOS Simulator' \
-            -derivedDataPath build \
-            build
+          sudo gem install cocoapods -NV || true
+          cd ios/App
+          pod repo update || true
+          pod install --repo-update
+          cd ../..
 
-      - name: Upload simulator app artifact
+      - name: Show Xcode setup (debug)
+        run: |
+          xcodebuild -version
+          xcodebuild -showsdks
+          xcodebuild -list -workspace ios/App/App.xcworkspace || true
+          xcodebuild -list -project ios/App/App.xcodeproj || true
+
+      - name: Build (Simulator) – iPhone 15
+        run: |
+          set -e
+          if [ -f "ios/App/App.xcworkspace" ]; then
+            xcodebuild \
+              -workspace ios/App/App.xcworkspace \
+              -scheme App \
+              -configuration Debug \
+              -sdk iphonesimulator \
+              -destination 'platform=iOS Simulator,name=iPhone 15' \
+              -derivedDataPath build \
+              clean build
+          else
+            xcodebuild \
+              -project ios/App/App.xcodeproj \
+              -scheme App \
+              -configuration Debug \
+              -sdk iphonesimulator \
+              -destination 'platform=iOS Simulator,name=iPhone 15' \
+              -derivedDataPath build \
+              clean build
+          fi
+
+      - name: Upload simulator artifact
         uses: actions/upload-artifact@v4
         with:
           name: ios-simulator-build
