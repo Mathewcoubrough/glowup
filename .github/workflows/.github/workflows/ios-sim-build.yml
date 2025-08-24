@@ -3,7 +3,7 @@ name: iOS (simulator) build
 on:
   workflow_dispatch:
   push:
-    branches: [ main ]   # change to your default branch if not 'main'
+    branches: [ main ]   # change if your default branch isn't 'main'
 
 jobs:
   build-ios-sim:
@@ -17,6 +17,12 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '20'
+
+      # ✅ Pin Xcode to a known version
+      - name: Setup Xcode 15.4
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: '15.4'
 
       - name: Install JS deps
         run: |
@@ -46,26 +52,36 @@ jobs:
           xcodebuild -list -workspace ios/App/App.xcworkspace || true
           xcodebuild -list -project ios/App/App.xcodeproj || true
 
-      - name: Build (Simulator) – iPhone 15
+      - name: Build (Simulator) – iPhone 15 Pro on latest iOS
+        env:
+          DEVELOPER_DIR: /Applications/Xcode_15.4.app/Contents/Developer
         run: |
-          set -e
+          set -euo pipefail
           if [ -f "ios/App/App.xcworkspace" ]; then
+            echo "Building via workspace"
             xcodebuild \
               -workspace ios/App/App.xcworkspace \
               -scheme App \
               -configuration Debug \
               -sdk iphonesimulator \
-              -destination 'platform=iOS Simulator,name=iPhone 15' \
+              -destination 'platform=iOS Simulator,name=iPhone 15 Pro,OS=latest' \
               -derivedDataPath build \
+              CODE_SIGNING_ALLOWED=NO \
+              CODE_SIGNING_REQUIRED=NO \
+              CODE_SIGN_IDENTITY="" \
               clean build
           else
+            echo "Building via project"
             xcodebuild \
               -project ios/App/App.xcodeproj \
               -scheme App \
               -configuration Debug \
               -sdk iphonesimulator \
-              -destination 'platform=iOS Simulator,name=iPhone 15' \
+              -destination 'platform=iOS Simulator,name=iPhone 15 Pro,OS=latest' \
               -derivedDataPath build \
+              CODE_SIGNING_ALLOWED=NO \
+              CODE_SIGNING_REQUIRED=NO \
+              CODE_SIGN_IDENTITY="" \
               clean build
           fi
 
