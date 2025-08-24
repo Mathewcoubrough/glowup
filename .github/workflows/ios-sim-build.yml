@@ -1,0 +1,59 @@
+name: iOS (simulator) build
+
+on:
+  workflow_dispatch:  # adds a Run button in Actions
+
+jobs:
+  build-ios-sim:
+    runs-on: macos-14
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Setup Xcode 15.4
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: '15.4'
+
+      - name: Minimal web + Capacitor scaffold
+        run: |
+          set -euxo pipefail
+          test -f package.json || echo '{ "name":"glowup","version":"1.0.0","private":true }' > package.json
+          test -f capacitor.config.json || cat > capacitor.config.json <<'EOF'
+          { "appId": "com.example.glowup", "appName": "GlowUp Money", "webDir": "web", "bundledWebRuntime": false }
+          EOF
+          mkdir -p web
+          test -f web/index.html || echo '<!doctype html><title>GlowUp</title><body>Simulator build OK</body>' > web/index.html
+
+      - name: Install Capacitor deps
+        run: npm i -D @capacitor/cli @capacitor/core @capacitor/ios
+
+      - name: Add & sync iOS
+        run: |
+          npx cap add ios || true
+          npx cap sync ios
+
+      - name: Install CocoaPods
+        run: |
+          if ! command -v pod >/dev/null 2>&1; then sudo gem install cocoapods -NV; fi
+          cd ios/App
+          pod install --no-repo-update
+          cd ../..
+
+      - name: Build for Simulator
+        run: |
+          xcodebuild -workspace ios/App/App.xcworkspace \
+            -scheme App -configuration Debug -sdk iphonesimulator \
+            -destination 'generic/platform=iOS Simulator' \
+            -derivedDataPath build \
+            build
+
+      - name: Upload .app (artifact)
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-simulator-app
+          path: build/Build/Products/**/App.app
