@@ -64,7 +64,7 @@ jobs:
           pod install --no-repo-update --verbose
           cd ../..
 
-      # Fail early if any required secret is missing
+      # Verify required secrets exist (fail early, clear message)
       - name: Check required secrets
         env:
           HAVE_P12: ${{ secrets.IOS_CERT_P12_BASE64 != '' }}
@@ -118,13 +118,64 @@ jobs:
           echo "Profile name: $NAME"
           echo "Profile UUID: $UUID"
           echo "Profile application-identifier: $APPID"
-          echo "Profile TeamIdentifier[0]: $TEAMINPROF"
+          echo "Profile TeamIdentifier[0]: $TEAMEINPROF"
 
           # Export for later steps (APPID is TEAMID.bundleid)
-          echo "PROFILE_UUID=$UUID"    >> $GITHUB_ENV
-          echo "PROFILE_NAME=$NAME"    >> $GITHUB_ENV
+          echo "PROFILE_UUID=$UUID"       >> $GITHUB_ENV
+          echo "PROFILE_NAME=$NAME"       >> $GITHUB_ENV
           echo "APP_BUNDLE_ID=${APPID#*.}" >> $GITHUB_ENV
-          echo "TEAM_ID=$TEAMINPROF"   >> $GITHUB_ENV
+          echo "TEAM_ID=$TEAMEINPROF"     >> $GITHUB_ENV
+
+      # Auto-detect the correct Xcode workspace/project and scheme
+      - name: Detect Xcode project & scheme
+        run: |
+          set -euxo pipefail
+          mkdir -p build
+          if [ -f "ios/App/App.xcworkspace" ]; then
+            PROJ_TYPE="workspace"
+            PROJ_PATH="ios/App/App.xcworkspace"
+            xcodebuild -list -json -workspace "$PROJ_PATH" > build/schemes.json 2>/dev/null || true
+          else
+            PROJ_TYPE="project"
+            PROJ_PATH="ios/App/App.xcodeproj"
+            xcodebuild -list -json -project "$PROJ_PATH" > build/schemes.json 2>/dev/null || true
+          fi
+          python3 - <<'PY'
+import json, sys
+j=json.load(open('build/schemes.json'))
+schemes=[]
+if 'project' in j and 'schemes' in j['project']:
+    schemes=j['project']['schemes']
+elif 'workspace' in j and 'schemes' in j['workspace']:
+    schemes=j['workspace']['schemes']
+elif 'schemes' in j:
+    schemes=j['schemes']
+pick = 'App' if 'App' in schemes else (schemes[0] if schemes else '')
+print(f"SCHEME={pick}")
+PY
+          echo "XCPROJ_TYPE=$PROJ_TYPE" >> $GITHUB_ENV
+          echo "XCPROJ_PATH=$PROJ_PATH" >> $GITHUB_ENV
+          cat build/schemes.json || true | sed -n '1,120p'
+          # export SCHEME from python's stdout
+          SCHEME_LINE=$(python3 - <<'PY'
+import json
+j=json.load(open('build/schemes.json'))
+schemes=[]
+if 'project' in j and 'schemes' in j['project']:
+    schemes=j['project']['schemes']
+elif 'workspace' in j and 'schemes' in j['workspace']:
+    schemes=j['workspace']['schemes']
+elif 'schemes' in j:
+    schemes=j['schemes']
+print('App' if 'App' in schemes else (schemes[0] if schemes else ''))
+PY
+)
+          if [ -z "$SCHEME_LINE" ]; then
+            echo "::error::No Xcode scheme found"
+            exit 1
+          fi
+          echo "SCHEME=$SCHEME_LINE" >> $GITHUB_ENV
+          echo "Using $PROJ_TYPE: $PROJ_PATH, scheme: $SCHEME_LINE"
 
       - name: Show Xcode setup / schemes
         run: |
@@ -148,15 +199,19 @@ jobs:
           PROFILE_NAME:   ${{ env.PROFILE_NAME }}
           PROFILE_UUID:   ${{ env.PROFILE_UUID }}
           APP_BUNDLE_ID:  ${{ env.APP_BUNDLE_ID }}
+          XCPROJ_TYPE:    ${{ env.XCPROJ_TYPE }}
+          XCPROJ_PATH:    ${{ env.XCPROJ_PATH }}
+          SCHEME:         ${{ env.SCHEME }}
         run: |
           set -euxo pipefail
           echo "Using APP_BUNDLE_ID: $APP_BUNDLE_ID"
           echo "Using TEAM_ID: $TEAM_ID"
+          echo "Using $XCPROJ_TYPE: $XCPROJ_PATH, scheme: $SCHEME"
           FLAGS="DEVELOPMENT_TEAM=$TEAM_ID PRODUCT_BUNDLE_IDENTIFIER=$APP_BUNDLE_ID CODE_SIGN_STYLE=Manual PROVISIONING_PROFILE_SPECIFIER=$PROFILE_NAME PROVISIONING_PROFILE=$PROFILE_UUID OTHER_CODE_SIGN_FLAGS=--keychain\ build.keychain-db"
-          if [ -f "ios/App/App.xcworkspace" ]; then
-            xcodebuild -workspace ios/App/App.xcworkspace -scheme App -configuration Release -destination 'generic/platform=iOS' $FLAGS -archivePath $PWD/build/App.xcarchive clean archive | tee build/xcodebuild-archive.log
+          if [ "$XCPROJ_TYPE" = "workspace" ]; then
+            xcodebuild -workspace "$XCPROJ_PATH" -scheme "$SCHEME" -configuration Release -destination 'generic/platform=iOS' $FLAGS -archivePath $PWD/build/App.xcarchive clean archive | tee build/xcodebuild-archive.log
           else
-            xcodebuild -project ios/App/App.xcodeproj     -scheme App -configuration Release -destination 'generic/platform=iOS' $FLAGS -archivePath $PWD/build/App.xcarchive clean archive | tee build/xcodebuild-archive.log
+            xcodebuild -project "$XCPROJ_PATH" -scheme "$SCHEME" -configuration Release -destination 'generic/platform=iOS' $FLAGS -archivePath $PWD/build/App.xcarchive clean archive | tee build/xcodebuild-archive.log
           fi
 
       - name: Export IPA (App Store)
