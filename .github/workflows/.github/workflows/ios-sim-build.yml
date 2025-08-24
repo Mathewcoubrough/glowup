@@ -1,90 +1,270 @@
-name: iOS (simulator) build
+name: iOS App Store build & upload (Apple ID, DEBUG)
 
 on:
   workflow_dispatch:
-  push:
-    branches: [ main ]   # change if your default branch isn't 'main'
 
 jobs:
-  build-ios-sim:
+  build-upload:
     runs-on: macos-14
+    timeout-minutes: 45
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Setup Node
-        uses: actions/setup-node@v4
+      - uses: actions/setup-node@v4
         with:
           node-version: '20'
 
-      # Pin Xcode to a known-good version
       - name: Setup Xcode 15.4
         uses: maxim-lobanov/setup-xcode@v1
         with:
           xcode-version: '15.4'
 
-      - name: Install JS deps
+      # Minimal web + Capacitor scaffold so xcodebuild has inputs
+      - name: Ensure Capacitor app files
         run: |
-          npm ci || npm i
+          set -euxo pipefail
+          test -f package.json || echo '{ "name":"glowup","version":"1.0.0","private":true }' > package.json
+          test -f capacitor.config.json || cat > capacitor.config.json <<EOF
+          { "appId": "DUMMY.REPLACED.LATER", "appName": "GlowUp Money", "webDir": "web", "bundledWebRuntime": false }
+          EOF
+          mkdir -p web build
+          test -f web/index.html || echo '<!doctype html><title>GlowUp</title><body>Build</body>' > web/index.html
+
+      - name: Install Capacitor toolchain
+        run: |
+          set -euxo pipefail
           npm i -D @capacitor/cli @capacitor/core @capacitor/ios
 
-      - name: Prepare iOS platform
+      - name: Add & sync iOS
         run: |
+          set -euxo pipefail
           npx cap add ios || true
           npx cap sync ios
-          echo "Contents of ios/ and ios/App:"
           ls -la ios || true
           ls -la ios/App || true
 
-      - name: Install CocoaPods and pods
+      - name: Install CocoaPods (CDN)
         run: |
-          sudo gem install cocoapods -NV || true
+          set -euxo pipefail
+          if ! command -v pod >/dev/null 2>&1; then sudo gem install cocoapods -NV; fi
           cd ios/App
-          pod repo update || true
-          pod install --repo-update
+          if [ -f Podfile ]; then
+            grep -q "cdn.cocoapods.org" Podfile || (echo "source 'https://cdn.cocoapods.org/'" | cat - Podfile > Podfile.tmp && mv Podfile.tmp Podfile)
+            grep -q "platform :ios" Podfile || echo "platform :ios, '13.0'" >> Podfile
+          else
+            printf "source 'https://cdn.cocoapods.org/'\nplatform :ios, '13.0'\nuse_frameworks!\n" > Podfile
+            cat >> Podfile <<'PODS'
+            target 'App' do
+              pod 'Capacitor', :path => '../../node_modules/@capacitor/ios'
+              pod 'CapacitorCordova', :path => '../../node_modules/@capacitor/ios'
+            end
+            PODS
+          fi
+          pod install --no-repo-update --verbose
           cd ../..
 
-      - name: Show Xcode setup (debug)
-        run: |
-          xcodebuild -version
-          xcodebuild -showsdks
-          xcodebuild -list -workspace ios/App/App.xcworkspace || true
-          xcodebuild -list -project ios/App/App.xcodeproj || true
-
-      - name: Build (Simulator) – iPhone 15 Pro (latest iOS)
+      # Verify required secrets exist (fail early, clear message)
+      - name: Check required secrets
         env:
-          DEVELOPER_DIR: /Applications/Xcode_15.4.app/Contents/Developer
+          HAVE_P12: ${{ secrets.IOS_CERT_P12_BASE64 != '' }}
+          HAVE_PWD: ${{ secrets.IOS_CERT_PASSWORD != '' }}
+          HAVE_PROF: ${{ secrets.IOS_PROFILE_BASE64 != '' }}
+          HAVE_ID:  ${{ secrets.APPLE_ID != '' }}
+          HAVE_ASP: ${{ secrets.FASTLANE_APPLE_APPLICATION_SPECIFIC_PASSWORD != '' }}
         run: |
-          set -euo pipefail
-          if [ -f "ios/App/App.xcworkspace" ]; then
-            xcodebuild \
-              -workspace ios/App/App.xcworkspace \
-              -scheme App \
-              -configuration Debug \
-              -sdk iphonesimulator \
-              -destination 'platform=iOS Simulator,name=iPhone 15 Pro,OS=latest' \
-              -derivedDataPath build \
-              CODE_SIGNING_ALLOWED=NO \
-              CODE_SIGNING_REQUIRED=NO \
-              CODE_SIGN_IDENTITY="" \
-              clean build
-          else
-            xcodebuild \
-              -project ios/App/App.xcodeproj \
-              -scheme App \
-              -configuration Debug \
-              -sdk iphonesimulator \
-              -destination 'platform=iOS Simulator,name=iPhone 15 Pro,OS=latest' \
-              -derivedDataPath build \
-              CODE_SIGNING_ALLOWED=NO \
-              CODE_SIGNING_REQUIRED=NO \
-              CODE_SIGN_IDENTITY="" \
-              clean build
+          set -e
+          echo "IOS_CERT_P12_BASE64 set?  $HAVE_P12"
+          echo "IOS_CERT_PASSWORD set?    $HAVE_PWD"
+          echo "IOS_PROFILE_BASE64 set?   $HAVE_PROF"
+          echo "APPLE_ID set?             $HAVE_ID"
+          echo "APP-SPECIFIC PASSWORD?    $HAVE_ASP"
+          if [ "$HAVE_P12" != "true" ] || [ "$HAVE_PWD" != "true" ] || [ "$HAVE_PROF" != "true" ] || [ "$HAVE_ID" != "true" ] || [ "$HAVE_ASP" != "true" ]; then
+            echo "::error::One or more required secrets are missing."
+            exit 1
           fi
 
-      - name: Upload simulator artifact
+      - name: Import signing assets
+        env:
+          IOS_CERT_P12_BASE64: ${{ secrets.IOS_CERT_P12_BASE64 }}
+          IOS_CERT_PASSWORD:   ${{ secrets.IOS_CERT_PASSWORD }}
+          IOS_PROFILE_BASE64:  ${{ secrets.IOS_PROFILE_BASE64 }}
+        run: |
+          set -euxo pipefail
+          echo "$IOS_CERT_P12_BASE64" | base64 --decode > signing.p12
+          echo "$IOS_PROFILE_BASE64"  | base64 --decode > profile.mobileprovision
+
+          KEYCHAIN=build.keychain-db
+          PASS=secret123
+          security create-keychain -p "$PASS" "$KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          security unlock-keychain -p "$PASS" "$KEYCHAIN"
+          security default-keychain -s "$KEYCHAIN"
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$PASS" "$KEYCHAIN"
+          security import signing.p12 -k "$KEYCHAIN" -P "$IOS_CERT_PASSWORD" -T /usr/bin/codesign -T /usr/bin/security
+          security list-keychains -d user -s "$KEYCHAIN" login.keychain-db
+          security find-identity -v -p codesigning "$KEYCHAIN" || true
+
+          mkdir -p ~/Library/MobileDevice/Provisioning\ Profiles
+          PROFILE_PATH=~/Library/MobileDevice/Provisioning\ Profiles/profile.mobileprovision
+          cp profile.mobileprovision "$PROFILE_PATH"
+
+          PROFILE_PLIST="$(security cms -D -i "$PROFILE_PATH")"
+          echo "$PROFILE_PLIST" > build/profile.plist
+          UUID=$(/usr/libexec/PlistBuddy -c 'Print :UUID' /dev/stdin <<< "$PROFILE_PLIST")
+          NAME=$(/usr/libexec/PlistBuddy -c 'Print :Name' /dev/stdin <<< "$PROFILE_PLIST")
+          APPID=$(/usr/libexec/PlistBuddy -c 'Print :Entitlements:application-identifier' /dev/stdin <<< "$PROFILE_PLIST" || true)
+          TEAMINPROF=$(/usr/libexec/PlistBuddy -c 'Print :TeamIdentifier:0' /dev/stdin <<< "$PROFILE_PLIST" || true)
+          echo "Profile name: $NAME"
+          echo "Profile UUID: $UUID"
+          echo "Profile application-identifier: $APPID"
+          echo "Profile TeamIdentifier[0]: $TEAMEINPROF"
+
+          # Export for later steps (APPID is TEAMID.bundleid)
+          echo "PROFILE_UUID=$UUID"       >> $GITHUB_ENV
+          echo "PROFILE_NAME=$NAME"       >> $GITHUB_ENV
+          echo "APP_BUNDLE_ID=${APPID#*.}" >> $GITHUB_ENV
+          echo "TEAM_ID=$TEAMEINPROF"     >> $GITHUB_ENV
+
+      # Auto-detect the correct Xcode workspace/project and scheme
+      - name: Detect Xcode project & scheme
+        run: |
+          set -euxo pipefail
+          mkdir -p build
+          if [ -f "ios/App/App.xcworkspace" ]; then
+            PROJ_TYPE="workspace"
+            PROJ_PATH="ios/App/App.xcworkspace"
+            xcodebuild -list -json -workspace "$PROJ_PATH" > build/schemes.json 2>/dev/null || true
+          else
+            PROJ_TYPE="project"
+            PROJ_PATH="ios/App/App.xcodeproj"
+            xcodebuild -list -json -project "$PROJ_PATH" > build/schemes.json 2>/dev/null || true
+          fi
+          python3 - <<'PY'
+import json, sys
+j=json.load(open('build/schemes.json'))
+schemes=[]
+if 'project' in j and 'schemes' in j['project']:
+    schemes=j['project']['schemes']
+elif 'workspace' in j and 'schemes' in j['workspace']:
+    schemes=j['workspace']['schemes']
+elif 'schemes' in j:
+    schemes=j['schemes']
+pick = 'App' if 'App' in schemes else (schemes[0] if schemes else '')
+print(f"SCHEME={pick}")
+PY
+          echo "XCPROJ_TYPE=$PROJ_TYPE" >> $GITHUB_ENV
+          echo "XCPROJ_PATH=$PROJ_PATH" >> $GITHUB_ENV
+          cat build/schemes.json || true | sed -n '1,120p'
+          # export SCHEME from python's stdout
+          SCHEME_LINE=$(python3 - <<'PY'
+import json
+j=json.load(open('build/schemes.json'))
+schemes=[]
+if 'project' in j and 'schemes' in j['project']:
+    schemes=j['project']['schemes']
+elif 'workspace' in j and 'schemes' in j['workspace']:
+    schemes=j['workspace']['schemes']
+elif 'schemes' in j:
+    schemes=j['schemes']
+print('App' if 'App' in schemes else (schemes[0] if schemes else ''))
+PY
+)
+          if [ -z "$SCHEME_LINE" ]; then
+            echo "::error::No Xcode scheme found"
+            exit 1
+          fi
+          echo "SCHEME=$SCHEME_LINE" >> $GITHUB_ENV
+          echo "Using $PROJ_TYPE: $PROJ_PATH, scheme: $SCHEME_LINE"
+
+      - name: Show Xcode setup / schemes
+        run: |
+          set -euxo pipefail
+          xcodebuild -version
+          xcodebuild -showsdks
+          xcodebuild -list -workspace ios/App/App.xcworkspace | tee build/xcodebuild-list.txt || true
+          xcodebuild -list -project ios/App/App.xcodeproj | tee -a build/xcodebuild-list.txt || true
+
+      - name: Set build number
+        env:
+          NUM: ${{ github.run_number }}
+        run: |
+          set -euxo pipefail
+          /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $NUM" ios/App/App/Info.plist || true
+          /usr/libexec/PlistBuddy -c "Print" ios/App/App/Info.plist | sed -n '1,120p' || true
+
+      - name: Archive (Release)
+        env:
+          TEAM_ID:        ${{ env.TEAM_ID }}
+          PROFILE_NAME:   ${{ env.PROFILE_NAME }}
+          PROFILE_UUID:   ${{ env.PROFILE_UUID }}
+          APP_BUNDLE_ID:  ${{ env.APP_BUNDLE_ID }}
+          XCPROJ_TYPE:    ${{ env.XCPROJ_TYPE }}
+          XCPROJ_PATH:    ${{ env.XCPROJ_PATH }}
+          SCHEME:         ${{ env.SCHEME }}
+        run: |
+          set -euxo pipefail
+          echo "Using APP_BUNDLE_ID: $APP_BUNDLE_ID"
+          echo "Using TEAM_ID: $TEAM_ID"
+          echo "Using $XCPROJ_TYPE: $XCPROJ_PATH, scheme: $SCHEME"
+          FLAGS="DEVELOPMENT_TEAM=$TEAM_ID PRODUCT_BUNDLE_IDENTIFIER=$APP_BUNDLE_ID CODE_SIGN_STYLE=Manual PROVISIONING_PROFILE_SPECIFIER=$PROFILE_NAME PROVISIONING_PROFILE=$PROFILE_UUID OTHER_CODE_SIGN_FLAGS=--keychain\ build.keychain-db"
+          if [ "$XCPROJ_TYPE" = "workspace" ]; then
+            xcodebuild -workspace "$XCPROJ_PATH" -scheme "$SCHEME" -configuration Release -destination 'generic/platform=iOS' $FLAGS -archivePath $PWD/build/App.xcarchive clean archive | tee build/xcodebuild-archive.log
+          else
+            xcodebuild -project "$XCPROJ_PATH" -scheme "$SCHEME" -configuration Release -destination 'generic/platform=iOS' $FLAGS -archivePath $PWD/build/App.xcarchive clean archive | tee build/xcodebuild-archive.log
+          fi
+
+      - name: Export IPA (App Store)
+        env:
+          APP_BUNDLE_ID: ${{ env.APP_BUNDLE_ID }}
+          PROFILE_NAME:  ${{ env.PROFILE_NAME }}
+        run: |
+          set -euxo pipefail
+          cat > ExportOptions.plist <<EOF
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0"><dict>
+            <key>method</key><string>app-store</string>
+            <key>signingStyle</key><string>manual</string>
+            <key>provisioningProfiles</key><dict>
+              <key>${APP_BUNDLE_ID}</key><string>${PROFILE_NAME}</string>
+            </dict>
+            <key>uploadSymbols</key><true/>
+            <key>stripSwiftSymbols</key><true/>
+            <key>compileBitcode</key><false/>
+          </dict></plist>
+          EOF
+          xcodebuild -exportArchive -archivePath $PWD/build/App.xcarchive -exportOptionsPlist ExportOptions.plist -exportPath $PWD/build | tee build/xcodebuild-export.log
+          ls -la build || true
+
+      - name: Upload to TestFlight (Apple ID auth)
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          FASTLANE_APPLE_APPLICATION_SPECIFIC_PASSWORD: ${{ secrets.FASTLANE_APPLE_APPLICATION_SPECIFIC_PASSWORD }}
+          APP_BUNDLE_ID: ${{ env.APP_BUNDLE_ID }}
+        run: |
+          set -euxo pipefail
+          sudo gem install fastlane -NV
+          IPA=$(ls build/*.ipa | head -n1)
+          if [ ! -f "$IPA" ]; then
+            echo "::error::No IPA found in build/. See previous steps' logs."
+            exit 1
+          fi
+          echo "Uploading IPA: $IPA for bundle: $APP_BUNDLE_ID"
+          fastlane deliver --verbose \
+            --username "$APPLE_ID" \
+            --ipa "$IPA" \
+            --app_identifier "$APP_BUNDLE_ID" \
+            --skip_screenshots true \
+            --skip_metadata true \
+            --force true
+
+      - name: Upload debug logs
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: ios-simulator-build
-          path: build/Build/Products/**/App.app
+          name: ios-debug-logs
+          path: |
+            build/**
+            ExportOptions.plist
+            ios/App/App/Info.plist
