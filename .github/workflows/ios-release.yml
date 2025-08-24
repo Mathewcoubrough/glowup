@@ -20,11 +20,12 @@ jobs:
         with:
           xcode-version: '15.4'
 
-      # Minimal web + Capacitor scaffold so xcodebuild has inputs
+      # --- Minimal web + Capacitor scaffold so xcodebuild has inputs ---
       - name: Ensure Capacitor app files
         run: |
           set -euxo pipefail
           test -f package.json || echo '{ "name":"glowup","version":"1.0.0","private":true }' > package.json
+          # Dummy appId here (we override with flags later)
           test -f capacitor.config.json || cat > capacitor.config.json <<'EOF'
           { "appId": "DUMMY.REPLACED.LATER", "appName": "GlowUp Money", "webDir": "web", "bundledWebRuntime": false }
           EOF
@@ -50,7 +51,7 @@ jobs:
           pod install --no-repo-update --verbose
           cd ../..
 
-      # Secrets sanity check so we fail early with a clear message
+      # --- Secrets sanity check so we fail clearly if something is missing ---
       - name: Check required secrets
         env:
           HAVE_P12: ${{ secrets.IOS_CERT_P12_BASE64 != '' }}
@@ -121,28 +122,20 @@ jobs:
           xcodebuild -list -project ios/App/App.xcodeproj | tee -a build/xcodebuild-list.txt || true
 
       - name: Force bundle id + version in Info.plist
-  env:
-    APP_BUNDLE_ID: ${{ env.APP_BUNDLE_ID }}
-    NUM: ${{ github.run_number }}
-  run: |
-    set -euxo pipefail
-    PLIST=ios/App/App/Info.plist
-
-    # Ensure CFBundleIdentifier equals the bundle id from your provisioning profile
-    /usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier $APP_BUNDLE_ID" "$PLIST" || \
-    /usr/libexec/PlistBuddy -c "Add :CFBundleIdentifier string $APP_BUNDLE_ID" "$PLIST"
-
-    # Safe versioning (won't fail if keys already exist)
-    /usr/libexec/PlistBuddy -c "Add :CFBundleShortVersionString string 1.0.0" "$PLIST" || true
-    /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString 1.0.0" "$PLIST" || true
-    /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $NUM" "$PLIST" || true
-
-    # Show we set it correctly
-    echo "----- Info.plist after edits -----"
-    /usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" "$PLIST" || true
-    /usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$PLIST" || true
-    /usr/libexec/PlistBuddy -c "Print :CFBundleVersion" "$PLIST" || true
-
+        env:
+          APP_BUNDLE_ID: ${{ env.APP_BUNDLE_ID }}
+          NUM: ${{ github.run_number }}
+        run: |
+          set -euxo pipefail
+          PLIST=ios/App/App/Info.plist
+          /usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier ${APP_BUNDLE_ID}" "$PLIST" || /usr/libexec/PlistBuddy -c "Add :CFBundleIdentifier string ${APP_BUNDLE_ID}" "$PLIST"
+          /usr/libexec/PlistBuddy -c "Add :CFBundleShortVersionString string 1.0.0" "$PLIST" || true
+          /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString 1.0.0" "$PLIST" || true
+          /usr/libexec/PlistBuddy -c "Set :CFBundleVersion ${NUM}" "$PLIST" || true
+          echo "----- Info.plist after edits -----"
+          /usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" "$PLIST" || true
+          /usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$PLIST" || true
+          /usr/libexec/PlistBuddy -c "Print :CFBundleVersion" "$PLIST" || true
 
       - name: Archive (Release)
         env:
