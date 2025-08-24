@@ -20,12 +20,12 @@ jobs:
         with:
           xcode-version: '15.4'
 
-      # Minimal web + Capacitor scaffold so xcodebuild has inputs
+      # --- Minimal web + Capacitor scaffold so xcodebuild has inputs ---
       - name: Ensure Capacitor app files
         run: |
           set -euxo pipefail
           test -f package.json || echo '{ "name":"glowup","version":"1.0.0","private":true }' > package.json
-          test -f capacitor.config.json || cat > capacitor.config.json <<EOF
+          test -f capacitor.config.json || cat > capacitor.config.json <<'EOF'
           { "appId": "DUMMY.REPLACED.LATER", "appName": "GlowUp Money", "webDir": "web", "bundledWebRuntime": false }
           EOF
           mkdir -p web build
@@ -64,13 +64,13 @@ jobs:
           pod install --no-repo-update --verbose
           cd ../..
 
-      # Verify required secrets exist (fail early, clear message)
+      # --- Secrets sanity check so we fail early with a clear message ---
       - name: Check required secrets
         env:
           HAVE_P12: ${{ secrets.IOS_CERT_P12_BASE64 != '' }}
           HAVE_PWD: ${{ secrets.IOS_CERT_PASSWORD != '' }}
           HAVE_PROF: ${{ secrets.IOS_PROFILE_BASE64 != '' }}
-          HAVE_ID:  ${{ secrets.APPLE_ID != '' }}
+          HAVE_ID: ${{ secrets.APPLE_ID != '' }}
           HAVE_ASP: ${{ secrets.FASTLANE_APPLE_APPLICATION_SPECIFIC_PASSWORD != '' }}
         run: |
           set -e
@@ -102,80 +102,26 @@ jobs:
           security default-keychain -s "$KEYCHAIN"
           security set-key-partition-list -S apple-tool:,apple: -s -k "$PASS" "$KEYCHAIN"
           security import signing.p12 -k "$KEYCHAIN" -P "$IOS_CERT_PASSWORD" -T /usr/bin/codesign -T /usr/bin/security
-          security list-keychains -d user -s "$KEYCHAIN" login.keychain-db
-          security find-identity -v -p codesigning "$KEYCHAIN" || true
 
           mkdir -p ~/Library/MobileDevice/Provisioning\ Profiles
           PROFILE_PATH=~/Library/MobileDevice/Provisioning\ Profiles/profile.mobileprovision
           cp profile.mobileprovision "$PROFILE_PATH"
 
+          # Parse profile and export variables for later steps
           PROFILE_PLIST="$(security cms -D -i "$PROFILE_PATH")"
           echo "$PROFILE_PLIST" > build/profile.plist
           UUID=$(/usr/libexec/PlistBuddy -c 'Print :UUID' /dev/stdin <<< "$PROFILE_PLIST")
           NAME=$(/usr/libexec/PlistBuddy -c 'Print :Name' /dev/stdin <<< "$PROFILE_PLIST")
           APPID=$(/usr/libexec/PlistBuddy -c 'Print :Entitlements:application-identifier' /dev/stdin <<< "$PROFILE_PLIST" || true)
           TEAMINPROF=$(/usr/libexec/PlistBuddy -c 'Print :TeamIdentifier:0' /dev/stdin <<< "$PROFILE_PLIST" || true)
+          echo "PROFILE_UUID=$UUID" >> $GITHUB_ENV
+          echo "PROFILE_NAME=$NAME"  >> $GITHUB_ENV
+          echo "APP_BUNDLE_ID=${APPID#*.}" >> $GITHUB_ENV
+          echo "TEAM_ID=$TEAMINPROF" >> $GITHUB_ENV
           echo "Profile name: $NAME"
           echo "Profile UUID: $UUID"
-          echo "Profile application-identifier: $APPID"
-          echo "Profile TeamIdentifier[0]: $TEAMEINPROF"
-
-          # Export for later steps (APPID is TEAMID.bundleid)
-          echo "PROFILE_UUID=$UUID"       >> $GITHUB_ENV
-          echo "PROFILE_NAME=$NAME"       >> $GITHUB_ENV
-          echo "APP_BUNDLE_ID=${APPID#*.}" >> $GITHUB_ENV
-          echo "TEAM_ID=$TEAMEINPROF"     >> $GITHUB_ENV
-
-      # Auto-detect the correct Xcode workspace/project and scheme
-      - name: Detect Xcode project & scheme
-        run: |
-          set -euxo pipefail
-          mkdir -p build
-          if [ -f "ios/App/App.xcworkspace" ]; then
-            PROJ_TYPE="workspace"
-            PROJ_PATH="ios/App/App.xcworkspace"
-            xcodebuild -list -json -workspace "$PROJ_PATH" > build/schemes.json 2>/dev/null || true
-          else
-            PROJ_TYPE="project"
-            PROJ_PATH="ios/App/App.xcodeproj"
-            xcodebuild -list -json -project "$PROJ_PATH" > build/schemes.json 2>/dev/null || true
-          fi
-          python3 - <<'PY'
-import json, sys
-j=json.load(open('build/schemes.json'))
-schemes=[]
-if 'project' in j and 'schemes' in j['project']:
-    schemes=j['project']['schemes']
-elif 'workspace' in j and 'schemes' in j['workspace']:
-    schemes=j['workspace']['schemes']
-elif 'schemes' in j:
-    schemes=j['schemes']
-pick = 'App' if 'App' in schemes else (schemes[0] if schemes else '')
-print(f"SCHEME={pick}")
-PY
-          echo "XCPROJ_TYPE=$PROJ_TYPE" >> $GITHUB_ENV
-          echo "XCPROJ_PATH=$PROJ_PATH" >> $GITHUB_ENV
-          cat build/schemes.json || true | sed -n '1,120p'
-          # export SCHEME from python's stdout
-          SCHEME_LINE=$(python3 - <<'PY'
-import json
-j=json.load(open('build/schemes.json'))
-schemes=[]
-if 'project' in j and 'schemes' in j['project']:
-    schemes=j['project']['schemes']
-elif 'workspace' in j and 'schemes' in j['workspace']:
-    schemes=j['workspace']['schemes']
-elif 'schemes' in j:
-    schemes=j['schemes']
-print('App' if 'App' in schemes else (schemes[0] if schemes else ''))
-PY
-)
-          if [ -z "$SCHEME_LINE" ]; then
-            echo "::error::No Xcode scheme found"
-            exit 1
-          fi
-          echo "SCHEME=$SCHEME_LINE" >> $GITHUB_ENV
-          echo "Using $PROJ_TYPE: $PROJ_PATH, scheme: $SCHEME_LINE"
+          echo "Bundle from profile: ${APPID#*.}"
+          echo "Team from profile:   $TEAMINPROF"
 
       - name: Show Xcode setup / schemes
         run: |
@@ -195,23 +141,19 @@ PY
 
       - name: Archive (Release)
         env:
-          TEAM_ID:        ${{ env.TEAM_ID }}
-          PROFILE_NAME:   ${{ env.PROFILE_NAME }}
-          PROFILE_UUID:   ${{ env.PROFILE_UUID }}
-          APP_BUNDLE_ID:  ${{ env.APP_BUNDLE_ID }}
-          XCPROJ_TYPE:    ${{ env.XCPROJ_TYPE }}
-          XCPROJ_PATH:    ${{ env.XCPROJ_PATH }}
-          SCHEME:         ${{ env.SCHEME }}
+          TEAM_ID:       ${{ env.TEAM_ID }}
+          PROFILE_NAME:  ${{ env.PROFILE_NAME }}
+          PROFILE_UUID:  ${{ env.PROFILE_UUID }}
+          APP_BUNDLE_ID: ${{ env.APP_BUNDLE_ID }}
         run: |
           set -euxo pipefail
           echo "Using APP_BUNDLE_ID: $APP_BUNDLE_ID"
           echo "Using TEAM_ID: $TEAM_ID"
-          echo "Using $XCPROJ_TYPE: $XCPROJ_PATH, scheme: $SCHEME"
           FLAGS="DEVELOPMENT_TEAM=$TEAM_ID PRODUCT_BUNDLE_IDENTIFIER=$APP_BUNDLE_ID CODE_SIGN_STYLE=Manual PROVISIONING_PROFILE_SPECIFIER=$PROFILE_NAME PROVISIONING_PROFILE=$PROFILE_UUID OTHER_CODE_SIGN_FLAGS=--keychain\ build.keychain-db"
-          if [ "$XCPROJ_TYPE" = "workspace" ]; then
-            xcodebuild -workspace "$XCPROJ_PATH" -scheme "$SCHEME" -configuration Release -destination 'generic/platform=iOS' $FLAGS -archivePath $PWD/build/App.xcarchive clean archive | tee build/xcodebuild-archive.log
+          if [ -f "ios/App/App.xcworkspace" ]; then
+            xcodebuild -workspace ios/App/App.xcworkspace -scheme App -configuration Release -destination 'generic/platform=iOS' $FLAGS -archivePath $PWD/build/App.xcarchive clean archive | tee build/xcodebuild-archive.log
           else
-            xcodebuild -project "$XCPROJ_PATH" -scheme "$SCHEME" -configuration Release -destination 'generic/platform=iOS' $FLAGS -archivePath $PWD/build/App.xcarchive clean archive | tee build/xcodebuild-archive.log
+            xcodebuild -project ios/App/App.xcodeproj     -scheme App -configuration Release -destination 'generic/platform=iOS' $FLAGS -archivePath $PWD/build/App.xcarchive clean archive | tee build/xcodebuild-archive.log
           fi
 
       - name: Export IPA (App Store)
