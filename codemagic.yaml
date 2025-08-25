@@ -7,16 +7,20 @@ workflows:
     environment:
       xcode: 15.4
       vars:
+        # 👇 EDIT THESE TWO
+        TEAM_ID: "YOUR_TEAM_ID_HERE"          # e.g. ABCDE12345 (from Apple Developer)
+        PROFILE_NAME: "YOUR_PROFILE_NAME_HERE" # the Profile *Name* in Apple portal (not filename)
+        # 👆 EDIT THESE TWO
+
+        BUNDLE_ID: "com.mathe.glowup"
         XCODE_WORKSPACE: "ios/App/App.xcworkspace"
         XCODE_SCHEME: "App"
 
     scripts:
-      - name: Bootstrap minimal project files
+      - name: Bootstrap minimal project
         script: |
           set -euxo pipefail
-          # Minimal package.json so npm works
           test -f package.json || echo '{ "name":"glowup","version":"1.0.0","private":true }' > package.json
-          # Capacitor config
           cat > capacitor.config.json <<'EOF'
           {
             "appId": "com.mathe.glowup",
@@ -25,9 +29,8 @@ workflows:
             "bundledWebRuntime": false
           }
           EOF
-          # Tiny web so Capacitor has something to copy
           mkdir -p web
-          test -f web/index.html || echo '<!doctype html><title>GlowUp</title><body>✅ Capacitor</body>' > web/index.html
+          test -f web/index.html || echo '<!doctype html><title>GlowUp</title><body>✅</body>' > web/index.html
 
       - name: Install JS deps & Capacitor
         script: |
@@ -47,26 +50,7 @@ workflows:
           pod install --no-repo-update
           cd ../..
 
-      - name: Extract signing info (team, bundle id, profile name)
-        script: |
-          set -euxo pipefail
-          PROFILES_DIR="$HOME/Library/MobileDevice/Provisioning Profiles"
-          PROFILE_PATH=$(ls "$PROFILES_DIR"/*.mobileprovision | head -n1)
-          echo "Using provisioning profile at: $PROFILE_PATH"
-          security cms -D -i "$PROFILE_PATH" > build/profile.plist
-          TEAM_ID=$(/usr/libexec/PlistBuddy -c 'Print :TeamIdentifier:0' build/profile.plist)
-          PROFILE_NAME=$(/usr/libexec/PlistBuddy -c 'Print :Name' build/profile.plist)
-          APP_ID=$(/usr/libexec/PlistBuddy -c 'Print :Entitlements:application-identifier' build/profile.plist)
-          BUNDLE_FROM_PROFILE="${APP_ID#*.}"
-          # Export vars for later steps
-          echo "TEAM_ID=$TEAM_ID"            >> $CM_ENV
-          echo "PROFILE_NAME=$PROFILE_NAME"  >> $CM_ENV
-          echo "BUNDLE_ID=$BUNDLE_FROM_PROFILE" >> $CM_ENV
-          echo "→ TEAM_ID: $TEAM_ID"
-          echo "→ PROFILE_NAME: $PROFILE_NAME"
-          echo "→ BUNDLE_ID: $BUNDLE_FROM_PROFILE"
-
-      - name: Set bundle id + version in Info.plist
+      - name: Set Info.plist values
         script: |
           set -euxo pipefail
           PLIST=ios/App/App/Info.plist
@@ -75,7 +59,7 @@ workflows:
           /usr/libexec/PlistBuddy -c "Add :CFBundleShortVersionString string 1.0.0" "$PLIST" || true
           /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString 1.0.0" "$PLIST" || true
           /usr/libexec/PlistBuddy -c "Set :CFBundleVersion ${BUILD_NUMBER}" "$PLIST" || true
-          /usr/libexec/PlistBuddy -c "Print" "$PLIST" | sed -n '1,120p' || true
+          /usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" "$PLIST" || true
 
       - name: Archive (Release)
         script: |
@@ -96,9 +80,7 @@ workflows:
         script: |
           set -euxo pipefail
           cat > ExportOptions.plist <<EOF
-          <?xml version="1.0" encoding="UTF-8"?>
-          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-          <plist version="1.0"><dict>
+          <?xml version="1.0" encoding="UTF-8"?><!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd"><plist version="1.0"><dict>
             <key>method</key><string>app-store</string>
             <key>signingStyle</key><string>manual</string>
             <key>provisioningProfiles</key><dict>
