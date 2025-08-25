@@ -12,11 +12,29 @@ workflows:
         XCODE_SCHEME: "App"
 
     scripts:
+      - name: Bootstrap minimal project files
+        script: |
+          set -euxo pipefail
+          # Minimal package.json so npm works
+          test -f package.json || echo '{ "name":"glowup","version":"1.0.0","private":true }' > package.json
+
+          # ✅ Create capacitor.config.json with your appId
+          cat > capacitor.config.json <<'EOF'
+          {
+            "appId": "com.mathe.glowup",
+            "appName": "GlowUp Money",
+            "webDir": "web",
+            "bundledWebRuntime": false
+          }
+          EOF
+
+          # Tiny web app so Capacitor has something to copy
+          mkdir -p web
+          test -f web/index.html || echo '<!doctype html><title>GlowUp</title><body>✅ Capacitor</body>' > web/index.html
+
       - name: Install JS deps & Capacitor
         script: |
           set -euxo pipefail
-          # Minimal package.json so npm commands work
-          test -f package.json || echo '{ "name":"glowup","version":"1.0.0","private":true }' > package.json
           npm i -D @capacitor/cli @capacitor/core @capacitor/ios
 
       - name: Sync iOS platform
@@ -32,14 +50,15 @@ workflows:
           pod install --no-repo-update
           cd ../..
 
-      - name: Set version/build in Info.plist
+      - name: Set bundle id + version in Info.plist
         script: |
           set -euxo pipefail
-          /usr/libexec/PlistBuddy -c "Add :CFBundleIdentifier string ${BUNDLE_ID}" ios/App/App/Info.plist || \
-          /usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier ${BUNDLE_ID}" ios/App/App/Info.plist
-          /usr/libexec/PlistBuddy -c "Add :CFBundleShortVersionString string 1.0.0" ios/App/App/Info.plist || true
-          /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString 1.0.0" ios/App/App/Info.plist || true
-          /usr/libexec/PlistBuddy -c "Set :CFBundleVersion ${BUILD_NUMBER}" ios/App/App/Info.plist || true
+          PLIST=ios/App/App/Info.plist
+          /usr/libexec/PlistBuddy -c "Add :CFBundleIdentifier string ${BUNDLE_ID}" "$PLIST" || \
+          /usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier ${BUNDLE_ID}" "$PLIST"
+          /usr/libexec/PlistBuddy -c "Add :CFBundleShortVersionString string 1.0.0" "$PLIST" || true
+          /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString 1.0.0" "$PLIST" || true
+          /usr/libexec/PlistBuddy -c "Set :CFBundleVersion ${BUILD_NUMBER}" "$PLIST" || true
 
       - name: Archive (Release)
         script: |
