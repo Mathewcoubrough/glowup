@@ -1,24 +1,38 @@
 workflows:
   ios_appstore:
-    name: iOS App Store IPA
+    name: iOS App Store (Capacitor)
     instance_type: mac_mini_m2
     max_build_duration: 60
 
     environment:
       xcode: 15.4
       vars:
-        BUNDLE_ID: "com.mathe.glowup"
-        XCODE_WORKSPACE: "ios/App/App.xcworkspace"
-        XCODE_SCHEME: "App"
+        BUNDLE_ID: com.mathe.glowup
+        XCODE_WORKSPACE: ios/App/App.xcworkspace
+        XCODE_SCHEME: App
 
     scripts:
-      - name: Install JS deps & Capacitor
+      - name: Prepare Node project & Capacitor scaffold
         script: |
           set -euxo pipefail
-          npm ci || npm i
+          # Create a minimal Node project if missing
+          if [ ! -f package.json ]; then
+            cat > package.json <<'JSON'
+          { "name": "glowup", "version": "1.0.0", "private": true }
+          JSON
+          fi
+          # Make a lockfile (so no npm ci error), then install what we need
+          npm install --package-lock-only || true
           npm i -D @capacitor/cli @capacitor/core @capacitor/ios
+          # Minimal web so iOS has content to bundle
+          mkdir -p web
+          [ -f web/index.html ] || echo '<!doctype html><title>GlowUp</title><body>✅ Hello</body>' > web/index.html
+          # Capacitor config (safe if already exists)
+          [ -f capacitor.config.json ] || cat > capacitor.config.json <<'JSON'
+          { "appId":"com.mathe.glowup","appName":"GlowUp Money","webDir":"web","bundledWebRuntime":false }
+          JSON
 
-      - name: Sync iOS platform
+      - name: Add & sync iOS
         script: |
           set -euxo pipefail
           npx cap add ios || true
@@ -31,42 +45,45 @@ workflows:
           pod install --no-repo-update
           cd ../..
 
-      - name: Create signing files from env (no Code signing UI needed)
+      - name: Install code signing identities from Codemagic UI
         script: |
           set -euxo pipefail
-          echo "$CERT_P12_B64" | base64 --decode > signing.p12
-          echo "$PROFILE_B64"  | base64 --decode > profile.mobileprovision
+          # This pulls in the .p12 and .mobileprovision you uploaded in the app's Code signing identities
+          keychain initialize
+          keychain add-certificates
+          # Find a provisioning profile that matches our bundle id
+          PROF_DIR="$HOME/Library/MobileDevice/Provisioning Profiles"
+          MATCH=""
+          for f in "$PROF_DIR"/*.mobileprovision; do
+            APPID=$(/usr/libexec/PlistBuddy -c 'Print :Entitlements:application-identifier' /dev/stdin <<< "$(security cms -D -i "$f")" || true)
+            if [[ "$APPID" == *".${BUNDLE_ID}" ]]; then
+              MATCH="$f"
+              break
+            fi
+          done
+          if [ -z "$MATCH" ]; then
+            echo "No provisioning profile found for bundle id $BUNDLE_ID"
+            ls -la "$PROF_DIR" || true
+            exit 1
+          fi
+          NAME=$(/usr/libexec/PlistBuddy -c 'Print :Name' /dev/stdin <<< "$(security cms -D -i "$MATCH")")
+          TEAM=$(/usr/libexec/PlistBuddy -c 'Print :TeamIdentifier:0' /dev/stdin <<< "$(security cms -D -i "$MATCH")")
+          echo "Using profile: $NAME (Team: $TEAM)"
+          # Persist for later steps
+          echo "PROFILE_NAME=$NAME" >> $CM_ENV
+          echo "TEAM_ID=$TEAM"     >> $CM_ENV
 
-          KEYCHAIN=build.keychain-db
-          PASS=secret123
-          security create-keychain -p "$PASS" "$KEYCHAIN"
-          security set-keychain-settings -lut 21600 "$KEYCHAIN"
-          security unlock-keychain -p "$PASS" "$KEYCHAIN"
-          security default-keychain -s "$KEYCHAIN"
-          security set-key-partition-list -S apple-tool:,apple: -s -k "$PASS" "$KEYCHAIN"
-          security import signing.p12 -k "$KEYCHAIN" -P "$CERT_P12_PASSWORD" -T /usr/bin/codesign -T /usr/bin/security
-          security find-identity -v -p codesigning "$KEYCHAIN" || true
-
-          mkdir -p ~/Library/MobileDevice/Provisioning\ Profiles
-          PROFILE_PATH=~/Library/MobileDevice/Provisioning\ Profiles/profile.mobileprovision
-          cp profile.mobileprovision "$PROFILE_PATH"
-
-          PLIST="$(security cms -D -i "$PROFILE_PATH")"
-          echo "$PLIST" > build/profile.plist
-          echo "PROFILE_NAME=$(/usr/libexec/PlistBuddy -c 'Print :Name' /dev/stdin <<< "$PLIST")"  >> $CM_ENV
-          echo "PROFILE_UUID=$(/usr/libexec/PlistBuddy -c 'Print :UUID' /dev/stdin <<< "$PLIST")"  >> $CM_ENV
-          echo "TEAM_ID=$(/usr/libexec/PlistBuddy -c 'Print :TeamIdentifier:0' /dev/stdin <<< "$PLIST")" >> $CM_ENV
-
-      - name: Force bundle id + version in Info.plist
+      - name: Force bundle id & version in Info.plist
         script: |
           set -euxo pipefail
           PLIST=ios/App/App/Info.plist
-          /usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier ${BUNDLE_ID}" "$PLIST" || /usr/libexec/PlistBuddy -c "Add :CFBundleIdentifier string ${BUNDLE_ID}" "$PLIST"
+          /usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier $BUNDLE_ID" "$PLIST" || /usr/libexec/PlistBuddy -c "Add :CFBundleIdentifier string $BUNDLE_ID" "$PLIST"
           /usr/libexec/PlistBuddy -c "Add :CFBundleShortVersionString string 1.0.0" "$PLIST" || true
           /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString 1.0.0" "$PLIST" || true
           /usr/libexec/PlistBuddy -c "Set :CFBundleVersion ${BUILD_NUMBER}" "$PLIST" || true
+          /usr/libexec/PlistBuddy -c "Print" "$PLIST" | sed -n '1,120p' || true
 
-      - name: Archive (Release)
+      - name: Build archive (Release)
         script: |
           set -euxo pipefail
           xcodebuild \
@@ -79,8 +96,7 @@ workflows:
             DEVELOPMENT_TEAM="$TEAM_ID" \
             PRODUCT_BUNDLE_IDENTIFIER="$BUNDLE_ID" \
             CODE_SIGN_STYLE=Manual \
-            PROVISIONING_PROFILE_SPECIFIER="$PROFILE_NAME" \
-            PROVISIONING_PROFILE="$PROFILE_UUID"
+            PROVISIONING_PROFILE_SPECIFIER="$PROFILE_NAME"
 
       - name: Export IPA
         script: |
@@ -103,3 +119,9 @@ workflows:
 
     artifacts:
       - build/*.ipa
+
+    publishing:
+      app_store_connect:
+        apple_id: $APPLE_ID
+        password: $APP_SPECIFIC_PASSWORD
+        submit_to_testflight: true
