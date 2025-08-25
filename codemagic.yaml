@@ -11,36 +11,55 @@ workflows:
         XCODE_WORKSPACE: "ios/App/App.xcworkspace"
         XCODE_SCHEME: "App"
 
+    # ⬇️ These names must match the files you UPLOADED in Codemagic code signing
     code_signing:
       certificates:
-        - C:\Users\Mathe\ios_dist.p12
+        - ios_dist.p12
       provisioning_profiles:
-        - C:\Users\Mathe\GlowUp_AppStore.mobileprovision
+        - GlowUp_AppStore.mobileprovision
 
     scripts:
       - name: Install JS deps & Capacitor
         script: |
+          set -euxo pipefail
+          npm ci || npm i
           npm i -D @capacitor/cli @capacitor/core @capacitor/ios
 
       - name: Sync iOS platform
         script: |
+          set -euxo pipefail
           npx cap add ios || true
           npx cap sync ios
 
       - name: Install CocoaPods
         script: |
+          set -euxo pipefail
           cd ios/App
           pod install --no-repo-update
           cd ../..
 
-      - name: Set version/build in Info.plist
+      - name: Read provisioning profile & export env
         script: |
-          /usr/libexec/PlistBuddy -c "Add :CFBundleShortVersionString string 1.0.0" ios/App/App/Info.plist || true
-          /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString 1.0.0" ios/App/App/Info.plist || true
-          /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $BUILD_NUMBER" ios/App/App/Info.plist || true
+          set -euxo pipefail
+          PROFILE="$(ls "$HOME/Library/MobileDevice/Provisioning Profiles"/*.mobileprovision | head -n1)"
+          PLIST="$(security cms -D -i "$PROFILE")"
+          echo "PROFILE_PATH=$PROFILE" >> $CM_ENV
+          echo "PROFILE_NAME=$(/usr/libexec/PlistBuddy -c 'Print :Name' /dev/stdin <<< "$PLIST")" >> $CM_ENV
+          echo "PROFILE_UUID=$(/usr/libexec/PlistBuddy -c 'Print :UUID' /dev/stdin <<< "$PLIST")" >> $CM_ENV
+          echo "TEAM_ID=$(/usr/libexec/PlistBuddy -c 'Print :TeamIdentifier:0' /dev/stdin <<< "$PLIST")" >> $CM_ENV
+
+      - name: Force bundle id + version in Info.plist
+        script: |
+          set -euxo pipefail
+          PLIST=ios/App/App/Info.plist
+          /usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier ${BUNDLE_ID}" "$PLIST" || /usr/libexec/PlistBuddy -c "Add :CFBundleIdentifier string ${BUNDLE_ID}" "$PLIST"
+          /usr/libexec/PlistBuddy -c "Add :CFBundleShortVersionString string 1.0.0" "$PLIST" || true
+          /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString 1.0.0" "$PLIST" || true
+          /usr/libexec/PlistBuddy -c "Set :CFBundleVersion ${BUILD_NUMBER}" "$PLIST" || true
 
       - name: Archive (Release)
         script: |
+          set -euxo pipefail
           xcodebuild \
             -workspace "$XCODE_WORKSPACE" \
             -scheme "$XCODE_SCHEME" \
@@ -48,34 +67,30 @@ workflows:
             -destination 'generic/platform=iOS' \
             -archivePath build/App.xcarchive \
             clean archive \
-            DEVELOPMENT_TEAM="$CM_DEVELOPER_TEAM" \
+            DEVELOPMENT_TEAM="$TEAM_ID" \
             PRODUCT_BUNDLE_IDENTIFIER="$BUNDLE_ID" \
             CODE_SIGN_STYLE=Manual \
-            PROVISIONING_PROFILE_SPECIFIER="$CM_PROVISIONING_PROFILE"
+            PROVISIONING_PROFILE_SPECIFIER="$PROFILE_NAME" \
+            PROVISIONING_PROFILE="$PROFILE_UUID"
 
       - name: Export IPA
         script: |
+          set -euxo pipefail
           cat > ExportOptions.plist <<EOF
           <?xml version="1.0" encoding="UTF-8"?>
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-          <plist version="1.0">
-          <dict>
+          <plist version="1.0"><dict>
             <key>method</key><string>app-store</string>
             <key>signingStyle</key><string>manual</string>
-            <key>provisioningProfiles</key>
-            <dict>
-              <key>${BUNDLE_ID}</key><string>${CM_PROVISIONING_PROFILE}</string>
+            <key>provisioningProfiles</key><dict>
+              <key>${BUNDLE_ID}</key><string>${PROFILE_NAME}</string>
             </dict>
             <key>uploadSymbols</key><true/>
             <key>stripSwiftSymbols</key><true/>
             <key>compileBitcode</key><false/>
-          </dict>
-          </plist>
+          </dict></plist>
           EOF
-          xcodebuild -exportArchive \
-            -archivePath build/App.xcarchive \
-            -exportOptionsPlist ExportOptions.plist \
-            -exportPath build
+          xcodebuild -exportArchive -archivePath build/App.xcarchive -exportOptionsPlist ExportOptions.plist -exportPath build
 
     artifacts:
       - build/*.ipa
