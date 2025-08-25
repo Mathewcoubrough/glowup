@@ -7,41 +7,37 @@ workflows:
     environment:
       xcode: 15.4
       vars:
-        # Known values for your app/team
         BUNDLE_ID: com.mathe.glowup
         TEAM_ID: 6Z68YP5J8N
         PROFILE_NAME: GlowUp_AppStore
-        # Xcode project bits
         XCODE_WORKSPACE: ios/App/App.xcworkspace
         XCODE_SCHEME: App
 
     scripts:
-      - name: Show repo & tool versions
+      - name: Preflight — check secrets
         script: |
           set -euxo pipefail
-          pwd; ls -la
-          node -v || true
-          npm -v || true
-          ruby -v || true
-          pod --version || true
+          test -n "${IOS_CERT_P12_BASE64:-}" || (echo "Missing IOS_CERT_P12_BASE64" && exit 1)
+          test -n "${IOS_CERT_PASSWORD:-}"   || (echo "Missing IOS_CERT_PASSWORD" && exit 1)
+          test -n "${IOS_PROFILE_BASE64:-}"  || (echo "Missing IOS_PROFILE_BASE64" && exit 1)
 
       - name: Ensure minimal web + Capacitor config
         script: |
           set -euxo pipefail
-          # Create tiny app skeleton if missing so the build has inputs
-          test -f package.json || echo '{ "name":"glowup","version":"1.0.0","private":true }' > package.json
-          test -f capacitor.config.json || cat > capacitor.config.json <<'EOF'
-          {
-            "appId": "com.mathe.glowup",
-            "appName": "GlowUp Money",
-            "webDir": "web",
-            "bundledWebRuntime": false
-          }
-          EOF
+          # Tiny app skeleton so build has inputs
+          if [ ! -f package.json ]; then
+            cat > package.json <<'JSON'
+          { "name":"glowup","version":"1.0.0","private":true }
+          JSON
+          fi
           mkdir -p web
-          test -f web/index.html || echo '<!doctype html><title>GlowUp</title><body>Build</body>' > web/index.html
+          [ -f web/index.html ] || echo '<!doctype html><title>GlowUp</title><body>Build</body>' > web/index.html
+          # Write capacitor config with your real bundle id
+          cat > capacitor.config.json <<JSON
+          { "appId": "${BUNDLE_ID}", "appName": "GlowUp Money", "webDir": "web", "bundledWebRuntime": false }
+          JSON
 
-      - name: Install JS deps & Capacitor
+      - name: Install Capacitor
         script: |
           set -euxo pipefail
           npm i -D @capacitor/cli @capacitor/core @capacitor/ios
@@ -58,20 +54,13 @@ workflows:
         script: |
           set -euxo pipefail
           cd ios/App
-          pod install --no-repo-update
+          pod install --no-repo-update --verbose
           cd ../..
-
-      - name: Check required signing env vars
-        script: |
-          set -euxo pipefail
-          : "${IOS_CERT_P12_BASE64:?Set IOS_CERT_P12_BASE64 in Environment variables}"
-          : "${IOS_CERT_PASSWORD:?Set IOS_CERT_PASSWORD in Environment variables}"
-          : "${IOS_PROFILE_BASE64:?Set IOS_PROFILE_BASE64 in Environment variables}"
 
       - name: Install signing files (ios_dist.p12.pfx / GlowUp_AppStore.mobileprovision)
         script: |
           set -euxo pipefail
-          # Write your secrets to files with the exact names you asked for
+          # Decode your secrets into the exact filenames you want
           echo "$IOS_CERT_P12_BASE64" | base64 --decode > ios_dist.p12.pfx
           echo "$IOS_PROFILE_BASE64"  | base64 --decode > GlowUp_AppStore.mobileprovision
 
@@ -84,13 +73,14 @@ workflows:
           security default-keychain -s "$KEYCHAIN"
           security set-key-partition-list -S apple-tool:,apple: -s -k "$PASS" "$KEYCHAIN"
           security import ios_dist.p12.pfx -k "$KEYCHAIN" -P "$IOS_CERT_PASSWORD" -T /usr/bin/codesign -T /usr/bin/security
+          security find-identity -v -p codesigning "$KEYCHAIN" || true
 
-          # Install the provisioning profile with the exact filename you asked for
+          # Install the provisioning profile with your filename
           mkdir -p "$HOME/Library/MobileDevice/Provisioning Profiles"
           PROFILE_PATH="$HOME/Library/MobileDevice/Provisioning Profiles/GlowUp_AppStore.mobileprovision"
           cp GlowUp_AppStore.mobileprovision "$PROFILE_PATH"
 
-          # Read profile info (helps avoid mismatches)
+          # Read profile info (verify matches)
           PROFILE_PLIST="$(security cms -D -i "$PROFILE_PATH")"
           mkdir -p build
           echo "$PROFILE_PLIST" > build/profile.plist
@@ -99,19 +89,13 @@ workflows:
           NAME=$(/usr/libexec/PlistBuddy -c 'Print :Name' build/profile.plist || true)
           TEAMINPROF=$(/usr/libexec/PlistBuddy -c 'Print :TeamIdentifier:0' build/profile.plist || true)
           BUNDLE_FROM_PROF="${APPID#*.}"
-
           echo "Profile: $NAME ($UUID)"
           echo "Bundle in profile: $BUNDLE_FROM_PROF"
           echo "Team in profile:   $TEAMINPROF"
 
-          # If the profile says a different bundle id or team, prefer the profile values
-          if [ -n "$BUNDLE_FROM_PROF" ] && [ "$BUNDLE_FROM_PROF" != "$BUNDLE_ID" ]; then
-            echo "BUNDLE_ID=$BUNDLE_FROM_PROF" >> $CM_ENV
-            echo "Adjusted BUNDLE_ID to $BUNDLE_FROM_PROF based on profile."
-          fi
-          if [ -n "$TEAMINPROF" ] && [ "$TEAMINPROF" != "$TEAM_ID" ]; then
-            echo "TEAM_ID=$TEAMINPROF" >> $CM_ENV
-            echo "Adjusted TEAM_ID to $TEAMINPROF based on profile."
+          if [ "$BUNDLE_FROM_PROF" != "$BUNDLE_ID" ]; then
+            echo "::error::Provisioning profile bundle id is '$BUNDLE_FROM_PROF' but BUNDLE_ID is '$BUNDLE_ID'"
+            exit 1
           fi
 
       - name: Force Info.plist bundle id + version
@@ -122,7 +106,6 @@ workflows:
           /usr/libexec/PlistBuddy -c "Add :CFBundleShortVersionString string 1.0.0" "$PLIST" || true
           /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString 1.0.0" "$PLIST" || true
           /usr/libexec/PlistBuddy -c "Set :CFBundleVersion ${BUILD_NUMBER}" "$PLIST" || true
-          echo "----- Info.plist after edits -----"
           /usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" "$PLIST" || true
           /usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$PLIST" || true
           /usr/libexec/PlistBuddy -c "Print :CFBundleVersion" "$PLIST" || true
@@ -140,7 +123,11 @@ workflows:
             DEVELOPMENT_TEAM="$TEAM_ID" \
             PRODUCT_BUNDLE_IDENTIFIER="$BUNDLE_ID" \
             CODE_SIGN_STYLE=Manual \
-            PROVISIONING_PROFILE_SPECIFIER="$PROFILE_NAME"
+            PROVISIONING_PROFILE_SPECIFIER="$PROFILE_NAME" \
+            OTHER_CODE_SIGN_FLAGS="--keychain build.keychain-db" \
+            | tee build/xcodebuild-archive.log
+          echo "---- any signing errors ----"
+          (grep -i -E "error:|provision|codesign|signing|bundle identifier|entitlement" -n build/xcodebuild-archive.log || true) | sed -n '1,200p'
 
       - name: Export IPA
         script: |
@@ -162,7 +149,11 @@ workflows:
           xcodebuild -exportArchive \
             -archivePath build/App.xcarchive \
             -exportOptionsPlist ExportOptions.plist \
-            -exportPath build
+            -exportPath build \
+            | tee build/xcodebuild-export.log
+          echo "---- any export errors ----"
+          (grep -i -E "error:|provision|codesign|signing|bundle identifier|entitlement" -n build/xcodebuild-export.log || true) | sed -n '1,200p'
+          ls -la build || true
 
     artifacts:
       - build/*.ipa
