@@ -7,35 +7,29 @@ workflows:
     environment:
       xcode: 15.4
       vars:
-        TEAM_ID: 6Z68YP5J8N
-        PROFILE_NAME: GlowUp Money
-        
+        # Your details (these match what you've told me)
         BUNDLE_ID: "com.mathe.glowup"
+        TEAM_ID: "6Z68YP5J8N"
         XCODE_WORKSPACE: "ios/App/App.xcworkspace"
         XCODE_SCHEME: "App"
 
     scripts:
-      - name: Bootstrap minimal project
+      - name: Ensure minimal project files
         script: |
           set -euxo pipefail
           test -f package.json || echo '{ "name":"glowup","version":"1.0.0","private":true }' > package.json
-          cat > capacitor.config.json <<'EOF'
-          {
-            "appId": "com.mathe.glowup",
-            "appName": "GlowUp Money",
-            "webDir": "web",
-            "bundledWebRuntime": false
-          }
+          test -f capacitor.config.json || cat > capacitor.config.json <<EOF
+          { "appId": "${BUNDLE_ID}", "appName": "GlowUp Money", "webDir": "web", "bundledWebRuntime": false }
           EOF
-          mkdir -p web
-          test -f web/index.html || echo '<!doctype html><title>GlowUp</title><body>✅</body>' > web/index.html
+          mkdir -p web build
+          test -f web/index.html || echo '<!doctype html><title>GlowUp</title><body>Build</body>' > web/index.html
 
-      - name: Install JS deps & Capacitor
+      - name: Install Node deps + Capacitor
         script: |
           set -euxo pipefail
           npm i -D @capacitor/cli @capacitor/core @capacitor/ios
 
-      - name: Sync iOS platform
+      - name: Add & sync iOS
         script: |
           set -euxo pipefail
           npx cap add ios || true
@@ -48,16 +42,52 @@ workflows:
           pod install --no-repo-update
           cd ../..
 
-      - name: Set Info.plist values
+      - name: Install signing files
+        script: |
+          set -euxo pipefail
+          # Requires IOS_CERT_P12_BASE64, IOS_CERT_PASSWORD, IOS_PROFILE_BASE64 in Environment variables
+          echo "$IOS_CERT_P12_BASE64" | base64 --decode > signing.p12
+          echo "$IOS_PROFILE_BASE64"  | base64 --decode > profile.mobileprovision
+
+          KEYCHAIN=build.keychain-db
+          PASS=secret123
+          security create-keychain -p "$PASS" "$KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          security unlock-keychain -p "$PASS" "$KEYCHAIN"
+          security default-keychain -s "$KEYCHAIN"
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$PASS" "$KEYCHAIN"
+          security import signing.p12 -k "$KEYCHAIN" -P "$IOS_CERT_PASSWORD" -T /usr/bin/codesign -T /usr/bin/security
+
+          mkdir -p "$HOME/Library/MobileDevice/Provisioning Profiles"
+          PROFILE_PATH="$HOME/Library/MobileDevice/Provisioning Profiles/profile.mobileprovision"
+          cp profile.mobileprovision "$PROFILE_PATH"
+
+          # Read profile info
+          PROFILE_PLIST="$(security cms -D -i "$PROFILE_PATH")"
+          echo "$PROFILE_PLIST" > build/profile.plist
+          PROFILE_NAME=$(/usr/libexec/PlistBuddy -c 'Print :Name' build/profile.plist)
+          PROFILE_UUID=$(/usr/libexec/PlistBuddy -c 'Print :UUID' build/profile.plist)
+          APPID=$(/usr/libexec/PlistBuddy -c 'Print :Entitlements:application-identifier' build/profile.plist)
+          BUNDLE_FROM_PROFILE="${APPID#*.}"
+          echo "PROFILE_NAME=$PROFILE_NAME" >> $CM_ENV
+          echo "PROFILE_UUID=$PROFILE_UUID" >> $CM_ENV
+          echo "→ Using profile: $PROFILE_NAME ($PROFILE_UUID) for $BUNDLE_FROM_PROFILE"
+
+          # If profile says a different bundle id, prefer it
+          if [ "$BUNDLE_ID" != "$BUNDLE_FROM_PROFILE" ]; then
+            echo "BUNDLE_ID=$BUNDLE_FROM_PROFILE" >> $CM_ENV
+            echo "Adjusted BUNDLE_ID to $BUNDLE_FROM_PROFILE based on provisioning profile"
+          fi
+
+      - name: Force Info.plist identifiers
         script: |
           set -euxo pipefail
           PLIST=ios/App/App/Info.plist
-          /usr/libexec/PlistBuddy -c "Add :CFBundleIdentifier string ${BUNDLE_ID}" "$PLIST" || \
-          /usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier ${BUNDLE_ID}" "$PLIST"
+          /usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier ${BUNDLE_ID}" "$PLIST" || /usr/libexec/PlistBuddy -c "Add :CFBundleIdentifier string ${BUNDLE_ID}" "$PLIST"
           /usr/libexec/PlistBuddy -c "Add :CFBundleShortVersionString string 1.0.0" "$PLIST" || true
           /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString 1.0.0" "$PLIST" || true
           /usr/libexec/PlistBuddy -c "Set :CFBundleVersion ${BUILD_NUMBER}" "$PLIST" || true
-          /usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" "$PLIST" || true
+          /usr/libexec/PlistBuddy -c "Print" "$PLIST" | sed -n '1,120p' || true
 
       - name: Archive (Release)
         script: |
@@ -78,15 +108,23 @@ workflows:
         script: |
           set -euxo pipefail
           cat > ExportOptions.plist <<EOF
-          <?xml version="1.0" encoding="UTF-8"?><!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd"><plist version="1.0"><dict>
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0"><dict>
             <key>method</key><string>app-store</string>
             <key>signingStyle</key><string>manual</string>
             <key>provisioningProfiles</key><dict>
               <key>${BUNDLE_ID}</key><string>${PROFILE_NAME}</string>
             </dict>
+            <key>uploadSymbols</key><true/>
+            <key>stripSwiftSymbols</key><true/>
+            <key>compileBitcode</key><false/>
           </dict></plist>
           EOF
-          xcodebuild -exportArchive -archivePath build/App.xcarchive -exportOptionsPlist ExportOptions.plist -exportPath build
+          xcodebuild -exportArchive \
+            -archivePath build/App.xcarchive \
+            -exportOptionsPlist ExportOptions.plist \
+            -exportPath build
 
     artifacts:
       - build/*.ipa
