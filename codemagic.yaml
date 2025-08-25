@@ -7,11 +7,9 @@ workflows:
     environment:
       xcode: 15.4
       vars:
-        # 👇 EDIT THESE TWO
         TEAM_ID: 6Z68YP5J8N
         PROFILE_NAME: GlowUp Money
-        # 👆 EDIT THESE TWO
-
+        
         BUNDLE_ID: "com.mathe.glowup"
         XCODE_WORKSPACE: "ios/App/App.xcworkspace"
         XCODE_SCHEME: "App"
